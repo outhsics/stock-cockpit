@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #0b0f17;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #243049;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #324063;
+}
+
+/* Markdown prose (for AI briefings) */
+.prose-briefing {
+  line-height: 1.7;
+}
+.prose-briefing h1,
+.prose-briefing h2,
+.prose-briefing h3 {
+  font-weight: 600;
+  margin-top: 1.4em;
+  margin-bottom: 0.5em;
+  color: #e2e8f0;
+}
+.prose-briefing h1 {
+  font-size: 1.4rem;
+}
+.prose-briefing h2 {
+  font-size: 1.15rem;
+}
+.prose-briefing h3 {
+  font-size: 1rem;
+}
+.prose-briefing p {
+  margin: 0.6em 0;
+}
+.prose-briefing ul,
+.prose-briefing ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.prose-briefing li {
+  margin: 0.25em 0;
+}
+.prose-briefing strong {
+  color: #f1f5f9;
+}
+.prose-briefing blockquote {
+  border-left: 3px solid #3b82f6;
+  padding-left: 0.9em;
+  margin: 0.8em 0;
+  color: #94a3b8;
+  background: rgba(59, 130, 246, 0.06);
+  border-radius: 0 6px 6px 0;
+  padding-top: 0.4em;
+  padding-bottom: 0.4em;
+}
+.prose-briefing code {
+  background: #1a2234;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  color: #60a5fa;
+}
+.prose-briefing a {
+  color: #60a5fa;
+  text-decoration: underline;
+}
+.prose-briefing hr {
+  border: 0;
+  border-top: 1px solid #243049;
+  margin: 1.4em 0;
+}
+.prose-briefing table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 0.9rem;
+}
+.prose-briefing th,
+.prose-briefing td {
+  border: 1px solid #243049;
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
