@@ -17,39 +17,56 @@ from typing import Any
 import httpx
 
 from ..config import settings
-from ..market.service import _av_daily_history, _cached_chart, _throttle
+from ..market.service import (
+    _av_daily_history, _cache_get, _cache_set, _cached_chart, _throttle,
+)
 
 log = logging.getLogger(__name__)
 
 
 def _yf_info(symbol: str) -> dict[str, Any]:
-    """Best-effort fetch of yfinance info dict (richer metadata). Degrades to {}."""
+    """yfinance info dict — primary source for fundamentals (doesn't consume
+    AV's scarce 25/day quota). Wrapped in a hard timeout via thread so it can
+    never hang the request."""
+    import concurrent.futures
     try:
-        import yfinance as yf
-        return yf.Ticker(symbol).info or {}
+        def _fetch():
+            import yfinance as yf
+            return yf.Ticker(symbol).info or {}
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            return ex.submit(_fetch).result(timeout=8)
     except Exception:  # noqa: BLE001
         return {}
 
 
 def _av_overview(symbol: str) -> dict[str, Any]:
-    """Alpha Vantage OVERVIEW: company fundamentals (P/E, market cap, etc)."""
+    """Alpha Vantage OVERVIEW — SECONDARY source. Only called if yfinance
+    returned nothing, and capped at a 5s timeout so a dead AV quota can't
+    hang the request. Results (incl. empty) are cached to avoid retries."""
     if not settings.alpha_vantage_api_key:
         return {}
-    _throttle()
+    # Negative cache: if AV just failed/had no data, don't retry for 5 min.
+    found, cached = _cache_get(f"avov:{symbol}", 300)
+    if found:
+        return cached or {}
     try:
-        with httpx.Client(timeout=15.0) as c:
+        with httpx.Client(timeout=5.0) as c:  # short timeout — AV is secondary
             r = c.get("https://www.alphavantage.co/query", params={
                 "function": "OVERVIEW", "symbol": symbol,
                 "apikey": settings.alpha_vantage_api_key,
             })
         if r.status_code != 200:
+            _cache_set(f"avov:{symbol}", {})
             return {}
         d = r.json()
         if not d or "Note" in d or "Information" in d or "Error Message" in d:
+            _cache_set(f"avov:{symbol}", {})
             return {}
+        _cache_set(f"avov:{symbol}", d)
         return d
     except Exception as exc:  # noqa: BLE001
         log.debug("AV overview failed for %s: %s", symbol, exc)
+        _cache_set(f"avov:{symbol}", {})
         return {}
 
 
@@ -90,40 +107,80 @@ def fundamentals(symbol: str) -> dict[str, Any]:
 
 
 def compare_symbols(symbols: list[str]) -> list[dict]:
-    """Compare multiple symbols side-by-side on key metrics."""
-    out = []
-    for sym in symbols:
-        sym = sym.strip().upper()
-        if not sym:
-            continue
-        f = fundamentals(sym)
-        out.append({
-            "symbol": sym,
-            "name": f.get("name", sym),
-            "type": f.get("type", ""),
-            "market_cap": f.get("market_cap"),
-            "pe_ratio": f.get("pe_ratio"),
-            "dividend_yield": f.get("dividend_yield"),
-            "expense_ratio": f.get("expense_ratio"),
-            "beta": f.get("beta"),
-            "52w_high": f.get("52w_high"),
-            "52w_low": f.get("52w_low"),
-        })
+    """Compare multiple symbols side-by-side. Fundamentals are fetched in
+    parallel (thread pool) so comparing 4 symbols takes ~1 network round-trip's
+    worth of wall-time instead of 4×."""
+    import concurrent.futures
+    clean = [s.strip().upper() for s in symbols if s.strip()]
+    if not clean:
+        return []
+    out: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(clean))) as ex:
+        futures = {ex.submit(fundamentals, sym): sym for sym in clean}
+        for sym in clean:
+            try:
+                f = futures[sym].result(timeout=15)
+            except Exception:  # noqa: BLE001
+                f = {}
+            out.append({
+                "symbol": sym,
+                "name": f.get("name", sym),
+                "type": f.get("type", ""),
+                "market_cap": f.get("market_cap"),
+                "pe_ratio": f.get("pe_ratio"),
+                "dividend_yield": f.get("dividend_yield"),
+                "expense_ratio": f.get("expense_ratio"),
+                "beta": f.get("beta"),
+                "52w_high": f.get("52w_high"),
+                "52w_low": f.get("52w_low"),
+            })
     return out
 
 
 def performance(symbol: str, periods: list[str] | None = None) -> dict:
-    """Return % return over multiple periods (1mo, 3mo, 6mo, 1y)."""
+    """Return % return over multiple periods (1mo, 3mo, 6mo, 1y).
+    Uses yfinance history directly (independent of the throttled Yahoo chart
+    path used by quotes) so it can't be blocked by quote traffic. Fetches the
+    longest period once and derives all shorter periods from it."""
+    import concurrent.futures
     symbol = symbol.strip().upper()
     periods = periods or ["1mo", "3mo", "6mo", "1y"]
     out: dict[str, Any] = {"symbol": symbol, "returns": {}}
+
+    # Map period → yfinance period string (fetch the longest, slice the rest).
+    yf_period = "1y"
+    if "5y" in periods:
+        yf_period = "5y"
+    elif "2y" in periods:
+        yf_period = "2y"
+    elif "1y" in periods:
+        yf_period = "1y"
+
+    try:
+        def _fetch():
+            import yfinance as yf
+            return yf.Ticker(symbol).history(period=yf_period)
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            hist = ex.submit(_fetch).result(timeout=10)
+        if hist.empty:
+            return out
+        closes = [float(c) for c in hist["Close"].tolist() if c == c]  # drop NaN
+    except Exception:  # noqa: BLE001
+        return out
+
+    # period → number of trading days to slice from the end
+    period_days = {"1mo": 22, "3mo": 66, "6mo": 132, "1y": 252, "2y": 504, "5y": 1260}
+    last = closes[-1]
     for p in periods:
-        pts = _av_daily_history(symbol, p) or []
-        if len(pts) >= 2:
-            first, last = pts[0]["close"], pts[-1]["close"]
-            out["returns"][p] = round((last - first) / first * 100, 2)
+        days = period_days.get(p, 252)
+        if len(closes) > days:
+            first = closes[-days]
+        elif len(closes) >= 2:
+            first = closes[0]
         else:
             out["returns"][p] = None
+            continue
+        out["returns"][p] = round((last - first) / first * 100, 2) if first else None
     return out
 
 
